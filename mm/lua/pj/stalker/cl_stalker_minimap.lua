@@ -5,20 +5,27 @@
 local MM = {}
 MM.Size     = 200       -- размер квадрата мини-карты в пикселях
 MM.Scale    = 0.1         -- пикселей на 1 хаммер-юнит (больше = крупнее)
-MM.NpcRange = 1200      -- радиус обнаружения НПС (hammer units)
+MM.NpcRange = 2500      -- радиус обнаружения НПС (hammer units)
 MM.X        = 10        -- позиция на экране
 MM.Y        = 10
+-- Сдвиг оси overview; вместе с yaw даёт «вперёд = вверх» на радаре
+MM.OverviewYawOffset = 90
 
 MM.PreviousOnline = 0
 
 -- Цвета точек
-local C_PLAYER  = Color(255, 255, 255, 255)   -- белая точка - игрок
-local C_NPC_NEU = Color(255, 200, 0,   255)   -- желтая - нейтрал
-local C_NPC_ENE = Color(255, 50,  50,  255)   -- красная - враг
-local C_NPC_FRN = Color(0,  255,   0,  255)   -- зеленая - друг
-local C_BORDER  = Color(80,  80,  80,  255)
-local C_BG      = Color(0,   0,   0,   180)
-local C_COMPASS = Color(200, 180, 50,  255)
+local C_PLAYER  	= Color(255, 255, 255, 255)   -- белая точка - игрок
+local C_NPC_NEU 	= Color(255, 200, 0,   255)   -- желтая - нейтрал
+local C_NPC_ENE 	= Color(255, 50,  50,  255)   -- красная - враг
+local C_NPC_FRN 	= Color(0,  255,   0,  255)   -- зеленая - друг
+local C_NPC_DEAD 	= Color(144, 144, 144, 255)	  -- серая - труп, сделано для энтити-рюкзаков, которые дропают нпс после смерти
+local C_BORDER  	= Color(80,  80,  80,  255)
+local C_BG      	= Color(0,   0,   0,   180)
+local C_COMPASS 	= Color(200, 180, 50,  255)
+
+local CD_HT = 1
+local CD_LI = 3
+local CD_NU = 4
 
 surface.CreateFont("MM_Compass", {font="Trebuchet MS", size=14, weight=700})
 surface.CreateFont("MM_Dist",    {font="Trebuchet MS", size=12, weight=400})
@@ -28,6 +35,87 @@ surface.CreateFont("MM_Ammo",    {font="Trebuchet MS", size=22, weight=700})
 local mapMat      = nil
 local mapData     = {}
 local mapLoaded   = false
+
+-- Сталкеры-враги
+-- Значение: { entity = Entity(), time = 0 }
+local m_tblEnemyStalkers = {}
+
+-- TODO: Заменить + на bit.bor(flag, flag, ...)? Есть ли вообще разница?
+local function IsAbleToSee(ply, ent)
+	local traceFilter = { ply }
+	
+	local tr = util.TraceLine({ start = ply:EyePos(), endpos = ent:WorldSpaceCenter(), filter = traceFilter, mask = MASK_SOLID + CONTENTS_HITBOX })
+	
+	-- Увидели центр тела цели
+	if (tr.Entity == ent) then
+		return true
+	end
+	
+	return false
+end
+
+-- Нам незачем каждый раз проводить математические формулы, делаем это один раз
+local localPlayerFOV = 0
+local localPlayerCosHalfFOV = 0
+
+-- Сколько секунд красная точка должна быть жирной?
+local LargeEnemyDotDuration = 2.0
+-- Через сколько секунд красная точка пропадет с мини-карты?
+local EnemyDotDissaper = 5.0
+
+local function PointWithinViewAngle(srcPos, targetPos, lookDir, cosHalfFOV)
+	local delta = targetPos - srcPos
+	local cosDiff = lookDir:Dot(delta)
+	
+	if (cosDiff < 0.0) then return false end
+	
+	local leng = delta:LengthSqr()
+	
+	return cosDiff * cosDiff > leng * cosHalfFOV * cosHalfFOV
+end
+
+local function IsEntInFOV(ply, ent)
+	-- Нам незачем каждый раз проводить математические формулы, делаем это один раз
+	if (localPlayerFOV != ply:GetFOV()) then
+		localPlayerFOV = ply:GetFOV()
+		localPlayerCosHalfFOV = math.cos(0.5 * localPlayerFOV * math.pi / 180)
+	end
+	
+	return PointWithinViewAngle(ply:EyePos(), ent:WorldSpaceCenter(), ply:GetAimVector(), localPlayerCosHalfFOV)
+end
+
+local function GetEnemy(ent)
+	for _, v in ipairs(m_tblEnemyStalkers) do
+		if (IsValid(v.entity) && v.entity:EntIndex() == ent:EntIndex()) then return v end
+	end
+	
+	return nil
+end
+
+local function AddEnemy(ent)
+	local bFound = false
+	
+	for _, v in ipairs(m_tblEnemyStalkers) do
+		if (IsValid(v.entity) && v.entity:EntIndex() == ent:EntIndex()) then
+			-- Чтобы огромная точка не появлялась каждый раз
+			v.time = CurTime() + EnemyDotDissaper
+			bFound = true
+			break
+		end
+	end
+	
+	if (bFound) then return end
+	
+	table.insert(m_tblEnemyStalkers, { entity = ent, time = CurTime() + EnemyDotDissaper, time2 = CurTime() })
+end
+
+local function ClearEnemies()
+	for k, v in ipairs(m_tblEnemyStalkers) do
+		if (CurTime() > v.time || !IsValid(v.entity)) then
+			table.remove(m_tblEnemyStalkers, k) 
+		end
+	end
+end
 
 -- local mapData =
 -- {
@@ -57,17 +145,42 @@ local function LoadMap()
     end
 end
 
+local function GetOverviewData()
+    if CStalkerMapData and CStalkerMapData.pos_x then
+        return CStalkerMapData
+    end
+    return mapData
+end
+
 local function WorldToUV(wx, wy)
-    if not CStalkerMapData.pos_x then return 0.5, 0.5 end
-    local scale = CStalkerMapData.scale or 1
-    local u = (wx - (CStalkerMapData.pos_x or 0)) / scale / 1024
-    local v = (wy - (CStalkerMapData.pos_y or 0)) / scale / 1024 * -1.0
+    local data = GetOverviewData()
+    if not data.pos_x then return 0.5, 0.5 end
+    local scale = data.scale or 1
+    local u = (wx - (data.pos_x or 0)) / scale / 1024
+    local v = (wy - (data.pos_y or 0)) / scale / 1024 * -1.0
     return u, v
 end
 
--- Перевести смещение в мировых единицах в пиксели на мини-карте
-local function DeltaToPixel(dx, dy)
-    return dx * MM.Scale, dy * MM.Scale
+local function GetOverviewTexPx()
+    local data = GetOverviewData()
+    return (data.scale or 1) * 1024 * MM.Scale
+end
+
+local function GetMapDrawYaw(eyeYaw)
+    return MM.OverviewYawOffset - eyeYaw
+end
+
+-- Точки: UV→texPx→Rotate — тот же угол, что у Matrix overview
+local function WorldPosToMinimapScreen(wx, wy, plyWx, plyWy, cx, cy, texPx, drawYaw)
+    local pu, pv = WorldToUV(plyWx, plyWy)
+    local u, v = WorldToUV(wx, wy)
+    local offset = Vector((u - pu) * texPx, (v - pv) * texPx, 0)
+    offset:Rotate(Angle(0, drawYaw, 0))
+    return cx + offset.x, cy - offset.y
+end
+
+local function EntityToMinimapScreen(ep, wpos, cx, cy, texPx, drawYaw)
+    return WorldPosToMinimapScreen(ep.x, ep.y, wpos.x, wpos.y, cx, cy, texPx, drawYaw)
 end
 
 -- ---- Компас ----
@@ -105,47 +218,49 @@ hook.Add("HUDPaint", "StalkerMinimap_Draw", function()
     local cy = MM.Y + MM.Size / 2
 
     local wpos = ply:GetPos()
-    local yaw  = ply:EyeAngles().y
+    local eyeYaw = ply:EyeAngles().y
+    local drawYaw = GetMapDrawYaw(eyeYaw)
+    local texPx = GetOverviewTexPx()
 
     -- === Фон + обрезка ===
-    -- Рисуем тёмный фон
     draw.RoundedBox(0, MM.X, MM.Y, MM.Size, MM.Size, C_BG)
 
-    -- Рисуем overview текстуру со смещением под игрока
+    -- Overview: поворот по взгляду; точки считаются тем же drawYaw
     if mapMat then
-        -- UV центра (позиция игрока на текстуре)
         local pu, pv = WorldToUV(wpos.x, wpos.y)
 
-        -- Размер текстуры в пикселях на мини-карте при данном масштабе:
-        -- overview покрывает scale*1024 хаммер-единиц
-        -- при MM.Scale пикс/юнит это scale*1024*MM.Scale пикселей
-        local texPx = (CStalkerMapData.scale or 1) * 1024 * MM.Scale
-
-        -- Смещение: центр текстуры = позиция игрока
-        local tx = cx - pu * texPx
-        local ty = cy - pv * texPx
-
-        -- Scissor чтобы не вылезало за пределы
         render.SetScissorRect(MM.X, MM.Y, MM.X+MM.Size, MM.Y+MM.Size, true)
         surface.SetDrawColor(255,255,255,200)
         surface.SetMaterial(mapMat)
-        surface.DrawTexturedRect(tx, ty, texPx, texPx)
+
+        local m = Matrix()
+        m:Translate(Vector(cx, cy, 0))
+        m:Rotate(Angle(0, drawYaw, 0))
+        m:Translate(Vector(-pu * texPx, -pv * texPx, 0))
+        cam.PushModelMatrix(m)
+        surface.DrawTexturedRect(0, 0, texPx, texPx)
+        cam.PopModelMatrix()
+
         render.SetScissorRect(0,0,0,0,false)
     else
-        -- Заглушка: двигающаяся сетка
+        -- Заглушка: сетка с тем же поворотом, что и карта
         render.SetScissorRect(MM.X, MM.Y, MM.X+MM.Size, MM.Y+MM.Size, true)
-        local gridSize = 40
-        local offX = (wpos.x * MM.Scale) % gridSize
-        local offY = (wpos.y * MM.Scale) % gridSize
         surface.SetDrawColor(30, 45, 30, 255)
         surface.DrawRect(MM.X, MM.Y, MM.Size, MM.Size)
+
+        local gridSize = 40
+        local gridSpan = math.ceil(MM.Size / gridSize) + 2
+        local mGrid = Matrix()
+        mGrid:Translate(Vector(cx, cy, 0))
+        mGrid:Rotate(Angle(0, drawYaw, 0))
+        cam.PushModelMatrix(mGrid)
         surface.SetDrawColor(45, 65, 45, 255)
-        for gx = MM.X - offX, MM.X + MM.Size, gridSize do
-            surface.DrawLine(gx, MM.Y, gx, MM.Y + MM.Size)
+        for i = -gridSpan, gridSpan do
+            local o = i * gridSize
+            surface.DrawLine(-MM.Size, o, MM.Size, o)
+            surface.DrawLine(o, -MM.Size, o, MM.Size)
         end
-        for gy = MM.Y - offY, MM.Y + MM.Size, gridSize do
-            surface.DrawLine(MM.X, gy, MM.X + MM.Size, gy)
-        end
+        cam.PopModelMatrix()
         render.SetScissorRect(0,0,0,0,false)
     end
 
@@ -166,15 +281,7 @@ hook.Add("HUDPaint", "StalkerMinimap_Draw", function()
 		
 		if (!bShouldDraw) then continue end
 		
-		local dx = ep.x - wpos.x
-		local dy = ep.y - wpos.y
-		
-		local rad = 0
-        local px  = dx * math.cos(rad) - dy * math.sin(rad)
-        local py  = dx * math.sin(rad) + dy * math.cos(rad)
-
-        local sx  = cx + px * MM.Scale
-        local sy  = cy - py * MM.Scale   -- Y инвертирован
+        local sx, sy = EntityToMinimapScreen(ep, wpos, cx, cy, texPx, drawYaw)
 
 		-- НПС или игрок
 		local dotC = C_NPC_NEU
@@ -186,6 +293,8 @@ hook.Add("HUDPaint", "StalkerMinimap_Draw", function()
 		iOnlineCount = iOnlineCount + 1
 	end
 	
+	-- TODO: Нужно переделать, из-за этого код обрабатывается 10 ms, но на игру не влияет
+	-- Можно заменить на ents.FindInSphere
 	for _, ent in ents.Iterator() do
 		if (!IsValid(ent)) then continue end
 		local ep = ent:GetPos()
@@ -193,55 +302,99 @@ hook.Add("HUDPaint", "StalkerMinimap_Draw", function()
 		
 		szClass = ent:GetClass()
 		local bShouldDraw = false
+		local bShouldDisplay = false
 		local iType = 0
+		local bIsEnemy = false
 		
-		if (string.find(szClass, "npc_")) then
-			bShouldDraw = true
-			iType = 1
-			iOnlineCount = iOnlineCount + 1
+		if (ent:IsNPC() || ent:IsNextBot()) then
+			bShouldDisplay = CStalkerCore:ShowNPCInMinimap(ent)
+			if (bShouldDisplay) then
+				iType = 1
+				iOnlineCount = iOnlineCount + 1
+			end
+		
 		elseif (string.find(szClass, "pda_mark_")) then
 			bShouldDraw = true
 			iType = 2
+			
+			if (ent.GetShowEveryone != nill && !ent:GetShowEveryone()) then
+				bShouldDraw = false
+			end
+		elseif ((ent:GetClass() == "pjblue_item_drop" || ent:GetClass() == "stalker_drop") && ent.m_bShowOnMM) then
+			bShouldDraw = true
+			
+			iType = 1
+		end
+		
+		if (ent.m_iAttitude != nil) then
+			bIsEnemy = ent.m_iAttitude == CD_HT
+		else
+			bIsEnemy = ent:GetNWInt("Attitude", 0) == CD_HT
+		end
+		
+		--print("minimap", bIsEnemy)
+		
+		local enemy = GetEnemy(ent)
+		
+		if (bIsEnemy && bShouldDisplay) then
+			-- Отображаем на мини-карте только если мы прям четко их видим
+			if (IsEntInFOV(LocalPlayer(), ent) && IsAbleToSee(LocalPlayer(), ent)) then
+				AddEnemy(ent)
+			end
+			
+			if (enemy != nil) then
+				if (CurTime() < enemy.time) then
+					bShouldDraw = true
+				end
+			end
+		elseif (!bIsEnemy && bShouldDisplay) then
+			bShouldDraw = true
 		end
 		
 		if (!bShouldDraw) then continue end
 		
-		-- Смещение от игрока в мировых ед.
-        local dx = ep.x - wpos.x
-        local dy = ep.y - wpos.y
-
-		-- FIXME: Не работает так, как нужно
-        -- Повернуть в экранное пространство (yaw игрока, чтобы карта была ориентирована по движению)
-        --local rad = math.rad(-yaw)
-		local rad = 0
-        local px  = dx * math.cos(rad) - dy * math.sin(rad)
-        local py  = dx * math.sin(rad) + dy * math.cos(rad)
-
-        local sx  = cx + px * MM.Scale
-        local sy  = cy - py * MM.Scale   -- Y инвертирован
+        local sx, sy = EntityToMinimapScreen(ep, wpos, cx, cy, texPx, drawYaw)
 
         -- Цвет точки
-		-- TODO: Disposition доступен только на стороне сервера, можно давать знак игроку об отношениях с помощью net
-        --local rel = ent:Disposition(ply)
-        --local dotC = (rel == D_LI or rel == D_FR) and C_NPC_NEU or C_NPC_ENE
 		
 		-- НПС или игрок
 		if (iType == 1) then
 			local dotC = C_NPC_NEU
 			
-			if (ent.m_iAttitude != nil) then
-				if (ent.m_iAttitude == D_HT) then
-					dotC = C_NPC_ENE
-				elseif (ent.m_iAttitude == D_FR || ent.m_iAttitude == D_NU) then
-					dotC = C_NPC_NEU
-				elseif (ent.m_iAttitude == D_LI) then
-					dotC = C_NPC_FRN
+			if (ent:IsPlayer() || ent:IsNextBot() || ent:IsNPC()) then
+				if (ent.m_iAttitude != nil) then
+					if (ent.m_iAttitude == CD_HT) then
+						dotC = C_NPC_ENE
+						bIsEnemy = true
+					elseif (ent.m_iAttitude == CD_FR || ent.m_iAttitude == CD_NU) then
+						dotC = C_NPC_NEU
+					elseif (ent.m_iAttitude == CD_LI) then
+						dotC = C_NPC_FRN
+					end
+				else
+					local iAttitude = ent:GetNWInt("Attitude", 0)
+					if (iAttitude == CD_HT) then
+						dotC = C_NPC_ENE
+						bIsEnemy = true
+					elseif (iAttitude == CD_LI) then
+						dotC = C_NPC_FRN
+					end
 				end
+			else
+				dotC = C_NPC_DEAD
 			end
 
 			--surface.SetDrawColor(dotC)
 			--surface.DrawRect(sx-3, sy-3, 6, 6)
-			draw.RoundedBox(99, sx-3, sy-3, 6, 6, dotC)
+			
+			local boxSize = 6
+			if (enemy != nil) then
+				if (CurTime() < enemy.time2 + LargeEnemyDotDuration) then
+					boxSize = 10
+				end
+			end
+			
+			draw.RoundedBox(99, sx-3, sy-3, boxSize, boxSize, dotC)
 		-- Особый маркер (тайник, лагерь и тд)
 		elseif (iType == 2) then
 			local hMat = nil
@@ -271,15 +424,10 @@ hook.Add("HUDPaint", "StalkerMinimap_Draw", function()
 	end
     render.SetScissorRect(0,0,0,0,false)
 
-    -- === Игрок — белая точка в центре + стрелка направления ===
-    -- Стрелка (маленький треугольник вверх = вперёд)
+    -- === Игрок — в центре; стрелка вверх (карта уже повёрнута, вперёд = вверх) ===
     surface.SetDrawColor(C_PLAYER)
     local arrowLen = 9
-    local arrowRad = math.rad(-yaw - 0) -- поворачиваем стрелку по yaw
-    -- Упрощённо: просто линия вперёд + боковые
-    local ax = cx + math.cos(arrowRad) * arrowLen
-    local ay = cy + math.sin(arrowRad) * arrowLen
-    surface.DrawLine(cx, cy, ax, ay)
+    surface.DrawLine(cx, cy, cx, cy - arrowLen)
 
     -- Белый кружок игрока
     draw.RoundedBox(99, cx-4, cy-4, 8, 8, C_PLAYER)
@@ -320,7 +468,7 @@ hook.Add("HUDPaint", "StalkerMinimap_Draw", function()
     --local compCX = MM.X + MM.Size/2
 	local compCX = MM.X + MM.Size/ 1.1
     local compCY = compY + compSize/2
-    local northRad = math.rad(-yaw - 90)   -- север
+    local northRad = math.rad(-eyeYaw - 90)
     -- Красная половина (север)
     surface.SetDrawColor(220, 50, 50, 255)
     surface.DrawLine(compCX, compCY,
@@ -333,7 +481,7 @@ hook.Add("HUDPaint", "StalkerMinimap_Draw", function()
         compCY - math.sin(northRad)*10)
 
     -- Буква направления над компасом
-    draw.SimpleText(GetCompassLabel(yaw), "MM_Compass",
+    draw.SimpleText(GetCompassLabel(eyeYaw), "MM_Compass",
         compCX, compY - 14,
         C_COMPASS, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
 
@@ -357,4 +505,8 @@ hook.Add("HUDPaint", "StalkerMinimap_Draw", function()
     draw.SimpleText(iOnlineCount, "MM_Ammo",
         MM.X + MM.Size/1.1, ammoY+14,
         Color(255,220,50,255), TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
+end)
+
+hook.Add("Think", "StalkerMinimap_Think", function()
+	ClearEnemies()
 end)

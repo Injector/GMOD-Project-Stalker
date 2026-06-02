@@ -9,6 +9,14 @@ net.Receive("CStalkerPDA::GetTask", function(len, ply)
 	local iStepsForEnts = net.ReadUInt(16)
 	local hReceivedEntitiesForSteps = {}
 	
+	-- print("ID", iID)
+	-- print("Title", szTitle)
+	-- print("Date", szDate)
+	-- print("Desc", szDesc)
+	-- print("Steps", szSteps)
+	-- print("Icon", szIconPath)
+	-- print("StepsEnt", iStepsForEnts)
+	
 	for i = 1, iStepsForEnts do
 		local ent = net.ReadEntity()
 		--Шаг 1 может содержать пустой энтити, но шаг 2 уже может содержать, так что будем использовать pairs
@@ -20,27 +28,7 @@ net.Receive("CStalkerPDA::GetTask", function(len, ply)
 	local szStepsArray = string.Split(szSteps, "|")
 	
 	for i = 1, #szStepsArray do
-		table.insert(stepsFinal, { done = false, text = szSteps[i], ent_marker = hReceivedEntitiesForSteps[i] })
-	end
-	
-	local hMat = nil
-
-	local iIconType = tonumber(szIconPath)
-	
-	if (iIconType != nil) then
-		if (iIconType == 0) then
-			hMat = PDA.Resources.TaskIcons.m_hMatArtefact
-		elseif (iIconType == 1) then
-			hMat = PDA.Resources.TaskIcons.m_hMatDefendLager
-		elseif (iIconType == 2) then
-			hMat = PDA.Resources.TaskIcons.m_hMatEliminateLager
-		elseif (iIconType == 3) then
-			hMat = PDA.Resources.TaskIcons.m_hMatItem
-		elseif (iIconType == 4) then
-			hMat = PDA.Resources.TaskIcons.m_hMatKill
-		end
-	else
-		hMat = Material(szIconPath)
+		table.insert(stepsFinal, { done = false, text = szStepsArray[i], ent_marker = hReceivedEntitiesForSteps[i] })
 	end
 	
 	--TODO: Очищать кастомные созданные материалы при выполнении задания. Чтобы не захламлять память
@@ -53,7 +41,8 @@ net.Receive("CStalkerPDA::GetTask", function(len, ply)
 		date = szDate,
 		desc = szDesc,
 		steps = stepsFinal,
-		icon = hMat
+		--icon = hMat,
+		iconPath = szIconPath
 	}
 	
 	table.insert(PDA.Tasks, task)
@@ -66,9 +55,21 @@ net.Receive("CStalkerPDA::UpdateTask", function(len, ply)
 	
 	for i = 1, #PDA.Tasks do
 		if (PDA.Tasks[i].id == iID) then
-			if (#PDA.Tasks[i].steps <= iStepIndex) then
+			--print("Found id "..tostring(#PDA.Tasks[i].steps).." "..tostring(iStepIndex))
+			if (iStepIndex <= #PDA.Tasks[i].steps) then
 				PDA.Tasks[i].steps[iStepIndex].done = bDone
 			end
+		end
+	end
+end)
+
+net.Receive("CStalkerPDA::RemoveTask", function(len, ply)
+	local iID = net.ReadUInt(16)
+	
+	--for i = 1, #PDA.Tasks do
+	for i = #PDA.Tasks, 1, -1 do
+		if (PDA.Tasks[i].id == iID) then
+			table.remove(PDA.Tasks, i)
 		end
 	end
 end)
@@ -91,65 +92,82 @@ end)
 
 net.Receive("CStalkerPDA::KnownMarker", function(len, ply)
 	
+	local iID = net.ReadUInt(8)
+	local iType = net.ReadUInt(4)
+	local szMsg = net.ReadString()
 	local hEnt = net.ReadEntity()
-	local iMarkType = net.ReadUInt(6)
 	
-	if (iMarkType == 1) then
-		table.insert(PDA.Markers.Stashes, hEnt)
-	elseif (iMarkType == 2) then
-		table.insert(PDA.Markers.Quests, hEnt)
-	elseif (iMarkType == 3) then
-		table.insert(PDA.Markers.Commons, hEnt)
-	elseif (iMarkType == 4) then
-		table.insert(PDA.Markers.Areas, hEnt)
+	if (IsValid(hEnt)) then
+		
+		local bFound = false
+		
+		for i = 1, #PDA.Markers.Stashes do
+			if (PDA.Markers.Stashes[i].id != nil && PDA.Markers.Stashes[i].id == iID) then
+				bFound = true
+				break
+			end
+		end
+		
+		if (!bFound) then
+			table.insert(PDA.Markers.Stashes, { id = iID, entity = hEnt})
+			
+			if (STALKER_AddMessage) then
+				STALKER_AddMessage("new_stash", szMsg, "pda/task_icons/base/found_thing.png")
+			end
+		end
 	end
-	
 end)
 
+-- TODO: Заменить на UInt для оптимизации трафика
+-- А для очистки до 0 использовать net.ReadBool(), если true то ставим 0
 net.Receive("CStalkerPDA::UpdatePlayerStats", function(len, ply)
 	
-	local iNPCKills = net.ReadUInt(20)
-	local iMutantKills = net.ReadUInt(20)
-	local iQuestsDone = net.ReadUInt(20)
+	local iNPCKills = net.ReadInt(18)
+	local iMutantKills = net.ReadInt(18)
+	local iQuestsDone = net.ReadInt(18)
 	
 	PDA.Stats.npc_kills = iNPCKills
 	PDA.Stats.mutant_kills = iMutantKills
 	PDA.Stats.quests_done = iQuestsDone
-	
 end)
 
-net.Receive("CStalkerPDA::UpdateKilledStats", function(len, ply)
+net.Receive("CStalkerPDA::UpdateKillStats", function(len, ply)
 	
 	local iID = net.ReadUInt(16)
 	local szName = net.ReadString()
 	local iMult = net.ReadUInt(16)
 	local iTotal = net.ReadUInt(16)
+	local iListType = net.ReadUInt(5)
 	
 	local bFound = false
 	
-	for i = 1, #PDA.Stats.kill_list do
+	local tbl = PDA.Stats.kill_list
+	
+	if (iListType == 2) then
+		tbl = PDA.Stats.kill_mutant_list
+	end
+	
+	for i = 1, #tbl do
 		
-		if (PDA.Stats.kill_list[i].id == iID) then
+		if (tbl[i].id == iID) then
 			
-			PDA.Stats.kill_list[i].mult = iMult
-			PDA.Stats.kill_list[i].total = iTotal
+			tbl[i].mult = iMult
+			tbl[i].total = iTotal
 			
 			bFound = true
+			break
 		end
 	end
 	
 	if (!bFound) then
-		table.insert(PDA.Stats.kill_list[i], { id = iID, name = szName, mult = iMult, total = iTotal })
+		table.insert(tbl, { id = iID, name = szName, mult = iMult, total = iTotal })
+	else
+		-- table.sort(tbl, function(a, b)
+			-- return a.name < b.name
+		-- end)
 	end
 	
-end)
-
-net.Receive("CStalkerPDA::UpdatePlayerStat", function(len, ply)
-	
-end)
-
-net.Receive("CStalkerPDA::SyncMap", function(len, ply)
-	PDA.MapData.pos_x = net.ReadInt(16)
-	PDA.MapData.pos_y = net.ReadInt(16)
-	PDA.MapData.scale = net.ReadFloat()
+	table.sort(tbl, function(a, b)
+		return a.name < b.name
+	end)
 end)

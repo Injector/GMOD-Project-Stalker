@@ -5,8 +5,8 @@
 local Messages = {}
 
 -- Настройки
-local MSG_MAX       = 3        -- максимум сообщений на экране
-local MSG_LIFETIME  = 30       -- секунд до начала исчезновения
+local MSG_MAX       = 4        -- максимум сообщений на экране
+local MSG_LIFETIME  = 10       -- секунд до начала исчезновения
 local MSG_FADETIME  = 3        -- секунд на исчезновение
 local MSG_W         = 420      -- ширина блока
 local MSG_ITEM_H    = 64       -- высота одного сообщения
@@ -117,7 +117,7 @@ hook.Add("HUDPaint", "StalkerMessages_Draw", function()
         local mx = sw - MSG_W - 10
 
         -- Картинка
-        local imgW = 50
+        local imgW = 80
         draw.RoundedBox(3, mx+8, my+7, imgW, MSG_ITEM_H-14, Color(C_IMG_BG.r,C_IMG_BG.g,C_IMG_BG.b,alpha))
         if m.image then
             local mat = Material(m.image)

@@ -1,4 +1,8 @@
 util.AddNetworkString("CStalkerPDA::GetTask")
 util.AddNetworkString("CStalkerPDA::UpdateTask")
 util.AddNetworkString("CStalkerPDA::AddNote")
+util.AddNetworkString("CStalkerPDA::KnownMarker")
+util.AddNetworkString("CStalkerPDA::UpdatePlayerStats")
+util.AddNetworkString("CStalkerPDA::UpdateKillStats")
+util.AddNetworkString("CStalkerPDA::RemoveTask")
 --util.AddNetworkString("CStalkerPDA::SyncMap")
