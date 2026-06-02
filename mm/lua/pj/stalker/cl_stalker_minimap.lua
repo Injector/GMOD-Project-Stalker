@@ -8,8 +8,6 @@ MM.Scale    = 0.1         -- пикселей на 1 хаммер-юнит (бо
 MM.NpcRange = 2500      -- радиус обнаружения НПС (hammer units)
 MM.X        = 10        -- позиция на экране
 MM.Y        = 10
--- Сдвиг оси overview; вместе с yaw даёт «вперёд = вверх» на радаре
-MM.OverviewYawOffset = 90
 
 MM.PreviousOnline = 0
 
@@ -145,42 +143,17 @@ local function LoadMap()
     end
 end
 
-local function GetOverviewData()
-    if CStalkerMapData and CStalkerMapData.pos_x then
-        return CStalkerMapData
-    end
-    return mapData
-end
-
 local function WorldToUV(wx, wy)
-    local data = GetOverviewData()
-    if not data.pos_x then return 0.5, 0.5 end
-    local scale = data.scale or 1
-    local u = (wx - (data.pos_x or 0)) / scale / 1024
-    local v = (wy - (data.pos_y or 0)) / scale / 1024 * -1.0
+    if not CStalkerMapData.pos_x then return 0.5, 0.5 end
+    local scale = CStalkerMapData.scale or 1
+    local u = (wx - (CStalkerMapData.pos_x or 0)) / scale / 1024
+    local v = (wy - (CStalkerMapData.pos_y or 0)) / scale / 1024 * -1.0
     return u, v
 end
 
-local function GetOverviewTexPx()
-    local data = GetOverviewData()
-    return (data.scale or 1) * 1024 * MM.Scale
-end
-
-local function GetMapDrawYaw(eyeYaw)
-    return MM.OverviewYawOffset - eyeYaw
-end
-
--- Точки: UV→texPx→Rotate — тот же угол, что у Matrix overview
-local function WorldPosToMinimapScreen(wx, wy, plyWx, plyWy, cx, cy, texPx, drawYaw)
-    local pu, pv = WorldToUV(plyWx, plyWy)
-    local u, v = WorldToUV(wx, wy)
-    local offset = Vector((u - pu) * texPx, (v - pv) * texPx, 0)
-    offset:Rotate(Angle(0, drawYaw, 0))
-    return cx + offset.x, cy - offset.y
-end
-
-local function EntityToMinimapScreen(ep, wpos, cx, cy, texPx, drawYaw)
-    return WorldPosToMinimapScreen(ep.x, ep.y, wpos.x, wpos.y, cx, cy, texPx, drawYaw)
+-- Перевести смещение в мировых единицах в пиксели на мини-карте
+local function DeltaToPixel(dx, dy)
+    return dx * MM.Scale, dy * MM.Scale
 end
 
 -- ---- Компас ----
@@ -218,49 +191,47 @@ hook.Add("HUDPaint", "StalkerMinimap_Draw", function()
     local cy = MM.Y + MM.Size / 2
 
     local wpos = ply:GetPos()
-    local eyeYaw = ply:EyeAngles().y
-    local drawYaw = GetMapDrawYaw(eyeYaw)
-    local texPx = GetOverviewTexPx()
+    local yaw  = ply:EyeAngles().y
 
     -- === Фон + обрезка ===
+    -- Рисуем тёмный фон
     draw.RoundedBox(0, MM.X, MM.Y, MM.Size, MM.Size, C_BG)
 
-    -- Overview: поворот по взгляду; точки считаются тем же drawYaw
+    -- Рисуем overview текстуру со смещением под игрока
     if mapMat then
+        -- UV центра (позиция игрока на текстуре)
         local pu, pv = WorldToUV(wpos.x, wpos.y)
 
+        -- Размер текстуры в пикселях на мини-карте при данном масштабе:
+        -- overview покрывает scale*1024 хаммер-единиц
+        -- при MM.Scale пикс/юнит это scale*1024*MM.Scale пикселей
+        local texPx = (CStalkerMapData.scale or 1) * 1024 * MM.Scale
+
+        -- Смещение: центр текстуры = позиция игрока
+        local tx = cx - pu * texPx
+        local ty = cy - pv * texPx
+
+        -- Scissor чтобы не вылезало за пределы
         render.SetScissorRect(MM.X, MM.Y, MM.X+MM.Size, MM.Y+MM.Size, true)
         surface.SetDrawColor(255,255,255,200)
         surface.SetMaterial(mapMat)
-
-        local m = Matrix()
-        m:Translate(Vector(cx, cy, 0))
-        m:Rotate(Angle(0, drawYaw, 0))
-        m:Translate(Vector(-pu * texPx, -pv * texPx, 0))
-        cam.PushModelMatrix(m)
-        surface.DrawTexturedRect(0, 0, texPx, texPx)
-        cam.PopModelMatrix()
-
+        surface.DrawTexturedRect(tx, ty, texPx, texPx)
         render.SetScissorRect(0,0,0,0,false)
     else
-        -- Заглушка: сетка с тем же поворотом, что и карта
+        -- Заглушка: двигающаяся сетка
         render.SetScissorRect(MM.X, MM.Y, MM.X+MM.Size, MM.Y+MM.Size, true)
+        local gridSize = 40
+        local offX = (wpos.x * MM.Scale) % gridSize
+        local offY = (wpos.y * MM.Scale) % gridSize
         surface.SetDrawColor(30, 45, 30, 255)
         surface.DrawRect(MM.X, MM.Y, MM.Size, MM.Size)
-
-        local gridSize = 40
-        local gridSpan = math.ceil(MM.Size / gridSize) + 2
-        local mGrid = Matrix()
-        mGrid:Translate(Vector(cx, cy, 0))
-        mGrid:Rotate(Angle(0, drawYaw, 0))
-        cam.PushModelMatrix(mGrid)
         surface.SetDrawColor(45, 65, 45, 255)
-        for i = -gridSpan, gridSpan do
-            local o = i * gridSize
-            surface.DrawLine(-MM.Size, o, MM.Size, o)
-            surface.DrawLine(o, -MM.Size, o, MM.Size)
+        for gx = MM.X - offX, MM.X + MM.Size, gridSize do
+            surface.DrawLine(gx, MM.Y, gx, MM.Y + MM.Size)
         end
-        cam.PopModelMatrix()
+        for gy = MM.Y - offY, MM.Y + MM.Size, gridSize do
+            surface.DrawLine(MM.X, gy, MM.X + MM.Size, gy)
+        end
         render.SetScissorRect(0,0,0,0,false)
     end
 
@@ -281,7 +252,15 @@ hook.Add("HUDPaint", "StalkerMinimap_Draw", function()
 		
 		if (!bShouldDraw) then continue end
 		
-        local sx, sy = EntityToMinimapScreen(ep, wpos, cx, cy, texPx, drawYaw)
+		local dx = ep.x - wpos.x
+		local dy = ep.y - wpos.y
+		
+		local rad = 0
+        local px  = dx * math.cos(rad) - dy * math.sin(rad)
+        local py  = dx * math.sin(rad) + dy * math.cos(rad)
+
+        local sx  = cx + px * MM.Scale
+        local sy  = cy - py * MM.Scale   -- Y инвертирован
 
 		-- НПС или игрок
 		local dotC = C_NPC_NEU
@@ -353,7 +332,19 @@ hook.Add("HUDPaint", "StalkerMinimap_Draw", function()
 		
 		if (!bShouldDraw) then continue end
 		
-        local sx, sy = EntityToMinimapScreen(ep, wpos, cx, cy, texPx, drawYaw)
+		-- Смещение от игрока в мировых ед.
+        local dx = ep.x - wpos.x
+        local dy = ep.y - wpos.y
+
+		-- FIXME: Не работает так, как нужно
+        -- Повернуть в экранное пространство (yaw игрока, чтобы карта была ориентирована по движению)
+        --local rad = math.rad(-yaw)
+		local rad = 0
+        local px  = dx * math.cos(rad) - dy * math.sin(rad)
+        local py  = dx * math.sin(rad) + dy * math.cos(rad)
+
+        local sx  = cx + px * MM.Scale
+        local sy  = cy - py * MM.Scale   -- Y инвертирован
 
         -- Цвет точки
 		
@@ -424,10 +415,15 @@ hook.Add("HUDPaint", "StalkerMinimap_Draw", function()
 	end
     render.SetScissorRect(0,0,0,0,false)
 
-    -- === Игрок — в центре; стрелка вверх (карта уже повёрнута, вперёд = вверх) ===
+    -- === Игрок — белая точка в центре + стрелка направления ===
+    -- Стрелка (маленький треугольник вверх = вперёд)
     surface.SetDrawColor(C_PLAYER)
     local arrowLen = 9
-    surface.DrawLine(cx, cy, cx, cy - arrowLen)
+    local arrowRad = math.rad(-yaw - 0) -- поворачиваем стрелку по yaw
+    -- Упрощённо: просто линия вперёд + боковые
+    local ax = cx + math.cos(arrowRad) * arrowLen
+    local ay = cy + math.sin(arrowRad) * arrowLen
+    surface.DrawLine(cx, cy, ax, ay)
 
     -- Белый кружок игрока
     draw.RoundedBox(99, cx-4, cy-4, 8, 8, C_PLAYER)
@@ -468,7 +464,7 @@ hook.Add("HUDPaint", "StalkerMinimap_Draw", function()
     --local compCX = MM.X + MM.Size/2
 	local compCX = MM.X + MM.Size/ 1.1
     local compCY = compY + compSize/2
-    local northRad = math.rad(-eyeYaw - 90)
+    local northRad = math.rad(-yaw - 90)   -- север
     -- Красная половина (север)
     surface.SetDrawColor(220, 50, 50, 255)
     surface.DrawLine(compCX, compCY,
@@ -481,7 +477,7 @@ hook.Add("HUDPaint", "StalkerMinimap_Draw", function()
         compCY - math.sin(northRad)*10)
 
     -- Буква направления над компасом
-    draw.SimpleText(GetCompassLabel(eyeYaw), "MM_Compass",
+    draw.SimpleText(GetCompassLabel(yaw), "MM_Compass",
         compCX, compY - 14,
         C_COMPASS, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
 
